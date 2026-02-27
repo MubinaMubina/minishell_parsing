@@ -1,0 +1,1397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Minishell Parsing Guide</title>
+<style>
+  @media print {
+    body { font-size: 11pt; }
+    .page-break { page-break-before: always; }
+    pre { font-size: 9pt; }
+  }
+  body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    max-width: 800px;
+    margin: 40px auto;
+    padding: 0 20px;
+    line-height: 1.7;
+    color: #1a1a1a;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28pt;
+    border-bottom: 3px solid #2c3e50;
+    padding-bottom: 15px;
+    margin-bottom: 5px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 12pt;
+    margin-bottom: 40px;
+  }
+  h2 {
+    color: #2c3e50;
+    border-bottom: 2px solid #3498db;
+    padding-bottom: 5px;
+    margin-top: 35px;
+  }
+  h3 {
+    color: #2980b9;
+    margin-top: 25px;
+  }
+  pre {
+    background: #f4f4f4;
+    border: 1px solid #ddd;
+    border-left: 4px solid #3498db;
+    padding: 12px;
+    overflow-x: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+  code {
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 10pt;
+  }
+  .concept-box {
+    background: #eaf6ff;
+    border: 1px solid #3498db;
+    border-radius: 8px;
+    padding: 15px;
+    margin: 15px 0;
+  }
+  .warning-box {
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 8px;
+    padding: 15px;
+    margin: 15px 0;
+  }
+  .flow-diagram {
+    background: #f9f9f9;
+    border: 2px solid #2c3e50;
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    font-family: 'Courier New', monospace;
+    margin: 20px 0;
+    line-height: 2;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 8px 12px;
+    text-align: left;
+  }
+  th {
+    background: #2c3e50;
+    color: white;
+  }
+  tr:nth-child(even) { background: #f9f9f9; }
+  .toc {
+    background: #f9f9f9;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px 30px;
+    margin: 20px 0;
+  }
+  .toc ul { list-style: none; padding-left: 0; }
+  .toc li { padding: 4px 0; }
+  .toc a { text-decoration: none; color: #2980b9; }
+  .arrow { color: #e74c3c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Minishell Parsing Guide</h1>
+<p class="subtitle">A complete reference for the parsing pipeline &mdash; mmubina @ 42</p>
+
+<!-- TABLE OF CONTENTS -->
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ul>
+    <li><strong>Part I &mdash; Concepts</strong></li>
+    <li>&nbsp;&nbsp;1. The Big Picture: Parsing Pipeline</li>
+    <li>&nbsp;&nbsp;2. Enums (typedef enum)</li>
+    <li>&nbsp;&nbsp;3. Linked Lists</li>
+    <li>&nbsp;&nbsp;4. Pointers to Pointers</li>
+    <li>&nbsp;&nbsp;5. State Machines (Quote Tracking)</li>
+    <li>&nbsp;&nbsp;6. Error Propagation with Return Values</li>
+    <li>&nbsp;&nbsp;7. String Building Character by Character</li>
+    <li><strong>Part II &mdash; Code Walkthrough</strong></li>
+    <li>&nbsp;&nbsp;8. Data Structures (minishell.h)</li>
+    <li>&nbsp;&nbsp;9. Tokenizer (tokenizer.c)</li>
+    <li>&nbsp;&nbsp;10. Token Utilities (token_utils.c)</li>
+    <li>&nbsp;&nbsp;11. Expander (expander.c + expander_utils.c)</li>
+    <li>&nbsp;&nbsp;12. Syntax Checker (syntax_check.c)</li>
+    <li>&nbsp;&nbsp;13. Parser (parser.c + parser_utils.c)</li>
+    <li>&nbsp;&nbsp;14. Main Loop (main.c)</li>
+    <li><strong>Part III &mdash; Full Example Trace</strong></li>
+    <li>&nbsp;&nbsp;15. End-to-End Walkthrough</li>
+  </ul>
+</div>
+
+<!-- ==================== PART I ==================== -->
+
+<h2>Part I &mdash; Concepts You Need to Know</h2>
+
+<div class="page-break"></div>
+
+<!-- 1. BIG PICTURE -->
+<h2>1. The Big Picture: Parsing Pipeline</h2>
+
+<p>When a user types a command in your shell, it goes through a series of transformations
+before the shell can execute it. Each stage takes one form of data and converts it to the next:</p>
+
+<div class="flow-diagram">
+  <strong>User types:</strong> echo $HOME | cat -e > out.txt<br><br>
+  <span class="arrow">&darr;</span> <em>Stage 1: Tokenizer (Lexer)</em><br>
+  [WORD:"echo"] &rarr; [WORD:"$HOME"] &rarr; [PIPE:"|"] &rarr; [WORD:"cat"] &rarr; [WORD:"-e"] &rarr; [REDIR_OUT:">"] &rarr; [WORD:"out.txt"]<br><br>
+  <span class="arrow">&darr;</span> <em>Stage 2: Expander</em><br>
+  [WORD:"echo"] &rarr; [WORD:"/home/mmubina"] &rarr; [PIPE:"|"] &rarr; [WORD:"cat"] &rarr; [WORD:"-e"] &rarr; [REDIR_OUT:">"] &rarr; [WORD:"out.txt"]<br><br>
+  <span class="arrow">&darr;</span> <em>Stage 3: Syntax Check</em><br>
+  Valid? Yes &rarr; continue / No &rarr; print error, skip<br><br>
+  <span class="arrow">&darr;</span> <em>Stage 4: Parser</em><br>
+  CMD 1: argv=["echo", "/home/mmubina"], redirs=none<br>
+  CMD 2: argv=["cat", "-e"], redirs=[REDIR_OUT &rarr; "out.txt"]
+</div>
+
+<p><strong>Why not do it all in one step?</strong> Separation of concerns. Each stage has one job and does it well.
+The tokenizer doesn't care about variable names. The expander doesn't care about pipes. The parser
+doesn't care about raw characters. This makes each part simpler to write, test, and debug.</p>
+
+<!-- 2. ENUMS -->
+<div class="page-break"></div>
+<h2>2. Enums (typedef enum)</h2>
+
+<div class="concept-box">
+  <strong>What is it?</strong> An enum is a way to give names to integer values, making code readable.
+  Instead of remembering "0 means word, 1 means pipe", you write TOKEN_WORD and TOKEN_PIPE.
+</div>
+
+<pre>
+typedef enum e_token_type
+{
+    TOKEN_WORD,       // = 0  (commands, arguments, filenames)
+    TOKEN_PIPE,       // = 1  (the | operator)
+    TOKEN_REDIR_IN,   // = 2  (the &lt; operator)
+    TOKEN_REDIR_OUT,  // = 3  (the &gt; operator)
+    TOKEN_HEREDOC,    // = 4  (the &lt;&lt; operator)
+    TOKEN_APPEND      // = 5  (the &gt;&gt; operator)
+}   t_token_type;
+</pre>
+
+<p><strong>How it works:</strong> C assigns integer values starting from 0, incrementing by 1.
+So <code>TOKEN_WORD == 0</code>, <code>TOKEN_PIPE == 1</code>, etc. You can use them in
+comparisons, switch statements, and function parameters.</p>
+
+<p><strong>Why use them?</strong> Compare these two lines:</p>
+<pre>
+if (token->type == 1)    // What does 1 mean? Who knows.
+if (token->type == TOKEN_PIPE)  // Crystal clear.
+</pre>
+
+<!-- 3. LINKED LISTS -->
+<div class="page-break"></div>
+<h2>3. Linked Lists</h2>
+
+<div class="concept-box">
+  <strong>What is it?</strong> A chain of nodes where each node holds some data and a pointer
+  to the next node. The last node points to NULL, marking the end of the list.
+</div>
+
+<h3>3.1 Why Not Arrays?</h3>
+<p>Arrays need a fixed size at creation time. But when tokenizing, we don't know how many tokens
+there will be until we finish scanning the input. Linked lists let us add nodes one at a time,
+growing dynamically.</p>
+
+<h3>3.2 Structure of a Node</h3>
+<pre>
+typedef struct s_token
+{
+    char            *value;    // data: the token text (e.g., "ls")
+    t_token_type    type;      // data: what kind of token
+    struct s_token  *next;     // pointer to next node (or NULL)
+}   t_token;
+</pre>
+
+<p>Visually, a linked list looks like this:</p>
+<pre>
+ [value:"ls"]     [value:"-la"]     [value:"|"]
+ [type: WORD]     [type: WORD]      [type: PIPE]
+ [next: ----] --> [next: ----] -->  [next: NULL]
+</pre>
+
+<h3>3.3 The Three Linked Lists in This Project</h3>
+<table>
+  <tr><th>Struct</th><th>Purpose</th><th>Where used</th></tr>
+  <tr>
+    <td><code>t_token</code></td>
+    <td>Chain of tokens from lexer output</td>
+    <td>tokenizer.c, token_utils.c</td>
+  </tr>
+  <tr>
+    <td><code>t_cmd</code></td>
+    <td>Chain of commands separated by pipes</td>
+    <td>parser.c, parser_utils.c</td>
+  </tr>
+  <tr>
+    <td><code>t_redir</code></td>
+    <td>Chain of redirections per command</td>
+    <td>parser.c, parser_utils.c</td>
+  </tr>
+</table>
+
+<h3>3.4 Core Operations</h3>
+
+<p><strong>Create a node (new_token):</strong></p>
+<pre>
+t_token  *new_token(char *value, t_token_type type)
+{
+    t_token  *token;
+
+    token = malloc(sizeof(t_token));  // allocate memory for one node
+    if (!token)
+        return (NULL);                // malloc failed
+    token->value = value;             // store the data
+    token->type = type;
+    token->next = NULL;               // not connected to anything yet
+    return (token);
+}
+</pre>
+<p><em>Key idea:</em> <code>malloc(sizeof(t_token))</code> allocates exactly enough bytes for one
+<code>t_token</code> struct on the heap. We always check if malloc returns NULL (out of memory).</p>
+
+<p><strong>Append to end (add_token):</strong></p>
+<pre>
+void  add_token(t_token **list, t_token *token)
+{
+    t_token  *tmp;
+
+    if (!*list)                // if list is empty
+    {
+        *list = token;         // new node becomes the head
+        return ;
+    }
+    tmp = *list;               // start at the head
+    while (tmp->next)          // walk to the last node
+        tmp = tmp->next;
+    tmp->next = token;         // attach new node at the end
+}
+</pre>
+<p><em>Key idea:</em> To append, we must walk to the end. This is O(n) &mdash; we visit every node.
+For minishell inputs this is fine since commands are short.</p>
+
+<p><strong>Free entire list (free_tokens):</strong></p>
+<pre>
+void  free_tokens(t_token *list)
+{
+    t_token  *tmp;
+
+    while (list)
+    {
+        tmp = list->next;      // save the next pointer BEFORE freeing
+        free(list->value);     // free the string data
+        free(list);            // free the node itself
+        list = tmp;            // move to next
+    }
+}
+</pre>
+<div class="warning-box">
+  <strong>Critical:</strong> Always save <code>list->next</code> BEFORE calling <code>free(list)</code>.
+  Once you free a node, its memory is gone &mdash; you can't access <code>list->next</code> after that.
+</div>
+
+<!-- 4. POINTERS TO POINTERS -->
+<div class="page-break"></div>
+<h2>4. Pointers to Pointers (t_token **list)</h2>
+
+<div class="concept-box">
+  <strong>What is it?</strong> A pointer that stores the address of another pointer.
+  Needed when a function must modify the caller's pointer (not just what it points to).
+</div>
+
+<h3>4.1 The Problem</h3>
+<p>In C, function arguments are passed by value &mdash; a copy. If you pass a pointer, the function
+gets a <em>copy</em> of that pointer. Modifying the copy doesn't change the original.</p>
+
+<pre>
+// THIS DOES NOT WORK:
+void  add_token(t_token *list, t_token *token)
+{
+    if (!list)
+        list = token;  // modifies the LOCAL copy, caller's pointer unchanged!
+}
+
+// In main:
+t_token *tokens = NULL;
+add_token(tokens, new_token("ls", TOKEN_WORD));
+// tokens is STILL NULL here!
+</pre>
+
+<h3>4.2 The Solution</h3>
+<p>Pass a pointer TO the pointer. Now the function can modify the original pointer via dereferencing:</p>
+
+<pre>
+// THIS WORKS:
+void  add_token(t_token **list, t_token *token)
+{
+    if (!*list)
+        *list = token;  // modifies what 'list' POINTS TO = the original pointer
+}
+
+// In main:
+t_token *tokens = NULL;
+add_token(&amp;tokens, new_token("ls", TOKEN_WORD));
+// tokens now points to the new node!
+</pre>
+
+<h3>4.3 Visual Explanation</h3>
+<pre>
+In main:          In add_token:
+
+tokens ----       list (the **) points to tokens
+  |                 |
+  v                 v
+ NULL        tokens (the caller's variable)
+                    |
+                    v
+                   NULL
+
+After *list = token:
+
+tokens ----
+  |
+  v
+ [WORD:"ls"] --> NULL
+</pre>
+
+<p><strong>Rule of thumb:</strong> If a function needs to change <em>where a pointer points</em>,
+that function needs a pointer-to-pointer (<code>**</code>). If it only needs to
+read/modify the <em>data</em> the pointer points at, a single pointer (<code>*</code>) is enough.</p>
+
+<!-- 5. STATE MACHINES -->
+<div class="page-break"></div>
+<h2>5. State Machines (Quote Tracking)</h2>
+
+<div class="concept-box">
+  <strong>What is it?</strong> A pattern where a variable tracks the current "state" of processing.
+  The code behaves differently depending on what state it's in. In this project, the state
+  is "are we inside quotes or not?"
+</div>
+
+<p>This pattern appears in three places: <code>expand_string()</code>, <code>remove_quotes()</code>,
+and the tokenizer's <code>skip_quotes()</code>.</p>
+
+<h3>5.1 How Quote Tracking Works</h3>
+<pre>
+char  quote = 0;           // state: 0 = not in quotes
+
+while (str[i])
+{
+    if (!quote && (str[i] == '\'' || str[i] == '"'))
+        quote = str[i];    // state: now inside this quote type
+    else if (quote && str[i] == quote)
+        quote = 0;         // state: closing quote found, back to normal
+    // ... behavior depends on 'quote' state ...
+    i++;
+}
+</pre>
+
+<p><strong>State transitions:</strong></p>
+<pre>
+Input: echo "hello 'world'" done
+
+State:  0  0  0  0  0  "  "  "  "  "  "  "  "  "  "  "  "  "  0  0  0  0  0
+Char:   e  c  h  o     "  h  e  l  l  o     '  w  o  r  l  d  '  "     d  o  n  e
+
+When quote = '"':
+  - Single quotes inside are treated as regular characters
+  - $ expansion still works (in expand_string)
+
+When quote = '\'':
+  - Double quotes inside are treated as regular characters
+  - $ expansion is BLOCKED (everything is literal)
+</pre>
+
+<p><strong>Why store the quote character and not just a boolean?</strong> Because single quotes
+and double quotes have different rules. By storing <em>which</em> quote opened, we know
+which character closes it, and we know whether to expand variables.</p>
+
+<!-- 6. ERROR PROPAGATION -->
+<div class="page-break"></div>
+<h2>6. Error Propagation with Return Values</h2>
+
+<div class="concept-box">
+  <strong>What is it?</strong> A pattern where a function returns a special value (like -1 or NULL)
+  to indicate failure, and every caller checks for that value and passes the error upward.
+</div>
+
+<p>This is used in the tokenizer to handle unclosed quotes:</p>
+
+<pre>
+skip_quotes()      -- detects unclosed quote, returns -1
+      |
+      v
+handle_word()      -- sees -1, returns -1 to its caller
+      |
+      v
+tokenize()         -- sees -1, frees memory, returns NULL
+      |
+      v
+main()             -- sees NULL, skips to next prompt
+</pre>
+
+<p><strong>The chain in code:</strong></p>
+<pre>
+// Level 1: detect the error
+static int  skip_quotes(char *input, int i)
+{
+    ...
+    if (!input[i])  // reached end without closing quote
+    {
+        write(2, "minishell: syntax error: unclosed quote\n", 40);
+        return (-1);                    // signal error
+    }
+    return (i + 1);                     // signal success (new position)
+}
+
+// Level 2: check and propagate
+static int  handle_word(char *input, int i, t_token **list)
+{
+    ...
+    i = skip_quotes(input, i);
+    if (i == -1)
+        return (-1);                    // propagate error upward
+    ...
+}
+
+// Level 3: clean up and propagate
+t_token  *tokenize(char *input)
+{
+    ...
+    i = handle_word(input, i, &amp;list);
+    if (i == -1)
+    {
+        free_tokens(list);              // clean up before returning
+        return (NULL);                  // propagate as NULL
+    }
+    ...
+}
+</pre>
+
+<div class="warning-box">
+  <strong>Important:</strong> When propagating errors, always free any memory you've allocated
+  before returning. In <code>tokenize()</code>, we call <code>free_tokens(list)</code> to free
+  any tokens that were created before the error occurred. Otherwise: memory leak.
+</div>
+
+<!-- 7. STRING BUILDING -->
+<div class="page-break"></div>
+<h2>7. String Building Character by Character</h2>
+
+<div class="concept-box">
+  <strong>What is it?</strong> Building a new string by appending one character (or one substring)
+  at a time. Used in the expander when the output string has different length than the input
+  (e.g., <code>$HOME</code> becomes <code>/home/mmubina</code>).
+</div>
+
+<p>The pattern used in <code>expand_string()</code>:</p>
+<pre>
+result = ft_strdup("");                              // start with empty string
+while (str[i])
+{
+    if (/* this is a $VAR */)
+        result = join_and_free(result, get_var_value(...));  // append expanded value
+    else
+        result = join_and_free(result, char_to_str(str[i++])); // append one char
+}
+</pre>
+
+<p><strong>Helper functions:</strong></p>
+<ul>
+  <li><code>char_to_str(c)</code> &mdash; converts a single char to a malloc'd 2-byte string ("x\0")</li>
+  <li><code>join_and_free(s1, s2)</code> &mdash; joins two strings, frees both originals, returns new string</li>
+</ul>
+
+<p><strong>Why <code>join_and_free</code>?</strong> Each <code>ft_strjoin</code> creates a NEW string.
+The old <code>result</code> string is no longer needed. If we don't free it, that's a memory leak
+on every single character.</p>
+
+<pre>
+// Without join_and_free: MEMORY LEAK
+result = ft_strjoin(result, "a");  // old result is lost, leaked!
+
+// With join_and_free: CORRECT
+result = join_and_free(result, char_to_str('a'));  // old result is freed
+</pre>
+
+<!-- ==================== PART II ==================== -->
+<div class="page-break"></div>
+<h2>Part II &mdash; Code Walkthrough</h2>
+
+<!-- 8. DATA STRUCTURES -->
+<h2>8. Data Structures (minishell.h)</h2>
+
+<p>The header defines three structs that form the backbone of the parsing pipeline:</p>
+
+<h3>8.1 t_token &mdash; Output of the Lexer</h3>
+<pre>
+typedef struct s_token
+{
+    char            *value;     // the text content, e.g., "ls", "|", ">"
+    t_token_type    type;       // what kind: WORD, PIPE, REDIR_IN, etc.
+    struct s_token  *next;      // next token in the linked list
+}   t_token;
+</pre>
+
+<h3>8.2 t_redir &mdash; A Single Redirection</h3>
+<pre>
+typedef struct s_redir
+{
+    char            *file;      // target filename, e.g., "out.txt"
+    t_token_type    type;       // which kind: REDIR_IN, REDIR_OUT, HEREDOC, APPEND
+    struct s_redir  *next;      // next redirection (a command can have multiple)
+}   t_redir;
+</pre>
+
+<h3>8.3 t_cmd &mdash; Output of the Parser</h3>
+<pre>
+typedef struct s_cmd
+{
+    char            **argv;         // NULL-terminated array: ["ls", "-la", NULL]
+    t_redir         *redirections;  // linked list of redirections for this command
+    struct s_cmd    *next;          // next command in the pipeline
+}   t_cmd;
+</pre>
+
+<p><strong>Relationship between them:</strong></p>
+<pre>
+t_cmd 1                          t_cmd 2
++---------------------------+    +---------------------------+
+| argv: ["cat", "f.txt"]   |    | argv: ["grep", "hello"]  |
+| redirections: NULL        |--->| redirections: ------+     |--> NULL
++---------------------------+    +---------------------|-----+
+                                                       v
+                                               t_redir
+                                               +------------------+
+                                               | file: "out.txt"  |
+                                               | type: REDIR_OUT  |
+                                               | next: NULL       |
+                                               +------------------+
+</pre>
+
+<!-- 9. TOKENIZER -->
+<div class="page-break"></div>
+<h2>9. Tokenizer (tokenizer.c)</h2>
+
+<p>The tokenizer (also called "lexer") is the first stage. It scans the input string character
+by character and produces a linked list of tokens.</p>
+
+<h3>9.1 tokenize() &mdash; The Entry Point</h3>
+<pre>
+t_token  *tokenize(char *input)
+{
+    t_token  *list;
+    int      i;
+
+    list = NULL;
+    i = 0;
+    while (input[i])
+    {
+        if (input[i] == ' ' || input[i] == '\t')
+            i++;                                    // skip whitespace
+        else if (is_operator_char(input[i]))
+            i = handle_operator(input, i, &amp;list);   // create operator token
+        else
+        {
+            i = handle_word(input, i, &amp;list);       // create word token
+            if (i == -1)                            // unclosed quote detected
+            {
+                free_tokens(list);
+                return (NULL);
+            }
+        }
+    }
+    return (list);
+}
+</pre>
+
+<p><strong>How it decides what to do:</strong></p>
+<table>
+  <tr><th>Character</th><th>Action</th><th>Function called</th></tr>
+  <tr><td>Space or Tab</td><td>Skip (separator)</td><td>None, just i++</td></tr>
+  <tr><td><code>|</code> <code>&lt;</code> <code>&gt;</code></td><td>Create operator token</td><td>handle_operator()</td></tr>
+  <tr><td>Anything else</td><td>Start accumulating a word</td><td>handle_word()</td></tr>
+</table>
+
+<h3>9.2 is_operator_char()</h3>
+<pre>
+static int  is_operator_char(char c)
+{
+    return (c == '|' || c == '&lt;' || c == '&gt;');
+}
+</pre>
+<p>Simple helper: returns 1 (true) if the character is a shell operator, 0 otherwise.</p>
+
+<h3>9.3 handle_operator()</h3>
+<pre>
+static int  handle_operator(char *input, int i, t_token **list)
+{
+    t_token_type  type;
+
+    if (input[i] == '|')
+    {
+        add_token(list, new_token(ft_strdup("|"), TOKEN_PIPE));
+        return (i + 1);          // consumed 1 character
+    }
+    type = get_redir_type(input, i);
+    if (type == TOKEN_HEREDOC || type == TOKEN_APPEND)
+    {
+        add_token(list, new_token(ft_substr(input, i, 2), type));
+        return (i + 2);          // consumed 2 characters (&lt;&lt; or &gt;&gt;)
+    }
+    add_token(list, new_token(ft_substr(input, i, 1), type));
+    return (i + 1);              // consumed 1 character (&lt; or &gt;)
+}
+</pre>
+<p><strong>Logic:</strong> Pipe is always 1 char. For <code>&lt;</code> and <code>&gt;</code>,
+we check if the next char is the same to detect <code>&lt;&lt;</code> (heredoc) or
+<code>&gt;&gt;</code> (append). The function returns the new index position after consuming
+the operator character(s).</p>
+
+<h3>9.4 handle_word()</h3>
+<pre>
+static int  handle_word(char *input, int i, t_token **list)
+{
+    int  start;
+
+    start = i;
+    while (input[i] && input[i] != ' ' && input[i] != '\t'
+        && !is_operator_char(input[i]))
+    {
+        if (input[i] == '\'' || input[i] == '"')
+        {
+            i = skip_quotes(input, i);
+            if (i == -1)
+                return (-1);          // unclosed quote error
+        }
+        else
+            i++;
+    }
+    add_token(list, new_token(ft_substr(input, start, i - start), TOKEN_WORD));
+    return (i);
+}
+</pre>
+<p><strong>Logic:</strong> A "word" is everything until we hit whitespace or an operator. But if we
+encounter a quote, we call <code>skip_quotes()</code> to jump over the quoted section (keeping
+spaces inside quotes as part of the word). At the end, <code>ft_substr</code> extracts the
+substring from <code>start</code> to <code>i</code>.</p>
+
+<p><strong>Example:</strong> Input: <code>echo "hello world"</code></p>
+<pre>
+handle_word called at i=5 (the 'e' after space... actually the '"')
+Wait, let's trace from tokenize:
+
+i=0: 'e' -> handle_word(input, 0, &amp;list)
+  start=0, walks e-c-h-o, hits ' ' at i=4
+  creates [WORD:"echo"], returns 4
+
+i=4: ' ' -> skip, i=5
+
+i=5: '"' -> handle_word(input, 5, &amp;list)
+  start=5, input[5]='"' -> skip_quotes jumps to i=18 (past closing ")
+  input[18] = '\0', loop ends
+  creates [WORD:"\"hello world\""], returns 18
+  (quotes are still in the value - removed later by expander)
+</pre>
+
+<h3>9.5 skip_quotes()</h3>
+<pre>
+static int  skip_quotes(char *input, int i)
+{
+    char  quote;
+
+    quote = input[i];       // save which quote character (' or ")
+    i++;                    // move past the opening quote
+    while (input[i] && input[i] != quote)
+        i++;                // scan until matching close or end of string
+    if (!input[i])          // reached end without finding closing quote
+    {
+        write(2, "minishell: syntax error: unclosed quote\n", 40);
+        return (-1);
+    }
+    return (i + 1);         // move past the closing quote
+}
+</pre>
+<p><strong>Error handling:</strong> If we reach <code>'\0'</code> without finding the closing quote,
+the quote is unclosed. We print an error and return -1, which propagates through
+<code>handle_word()</code> and <code>tokenize()</code> back to <code>main()</code>.</p>
+
+<!-- 10. TOKEN UTILS -->
+<div class="page-break"></div>
+<h2>10. Token Utilities (token_utils.c)</h2>
+
+<p>This file contains the linked list operations for tokens (covered in Section 3.4) plus
+one additional function:</p>
+
+<h3>10.1 get_redir_type()</h3>
+<pre>
+t_token_type  get_redir_type(char *str, int i)
+{
+    if (str[i] == '&lt;')
+    {
+        if (str[i + 1] == '&lt;')
+            return (TOKEN_HEREDOC);     // &lt;&lt;
+        return (TOKEN_REDIR_IN);        // &lt;
+    }
+    if (str[i + 1] == '&gt;')
+        return (TOKEN_APPEND);          // &gt;&gt;
+    return (TOKEN_REDIR_OUT);           // &gt;
+}
+</pre>
+
+<p><strong>Decision tree:</strong></p>
+<pre>
+Current char is '&lt;'?
+  ├── Next char is '&lt;'?  --> TOKEN_HEREDOC  (&lt;&lt;)
+  └── No                  --> TOKEN_REDIR_IN  (&lt;)
+Current char is '&gt;'?
+  ├── Next char is '&gt;'?  --> TOKEN_APPEND    (&gt;&gt;)
+  └── No                  --> TOKEN_REDIR_OUT (&gt;)
+</pre>
+
+<h3>10.2 token_list_size()</h3>
+<pre>
+int  token_list_size(t_token *list)
+{
+    int  count;
+
+    count = 0;
+    while (list)
+    {
+        count++;
+        list = list->next;
+    }
+    return (count);
+}
+</pre>
+<p>Standard linked list length function &mdash; walk every node, count them.</p>
+
+<!-- 11. EXPANDER -->
+<div class="page-break"></div>
+<h2>11. Expander (expander.c + expander_utils.c)</h2>
+
+<p>The expander walks through each WORD token and replaces <code>$VAR</code> with its environment
+value and removes quotes. It uses the <strong>state machine</strong> (Section 5) and
+<strong>string building</strong> (Section 7) patterns.</p>
+
+<h3>11.1 expand_tokens() &mdash; Entry Point</h3>
+<pre>
+void  expand_tokens(t_token *list, int exit_status)
+{
+    char  *expanded;
+    char  *unquoted;
+
+    while (list)
+    {
+        if (list->type == TOKEN_WORD)
+        {
+            expanded = expand_string(list->value, exit_status);
+            free(list->value);           // free old value
+            unquoted = remove_quotes(expanded);
+            free(expanded);              // free intermediate value
+            list->value = unquoted;      // store final value
+        }
+        list = list->next;
+    }
+}
+</pre>
+<p><strong>Two-step process for each WORD token:</strong></p>
+<ol>
+  <li><code>expand_string()</code> &mdash; replaces <code>$VAR</code> with values (quotes still present)</li>
+  <li><code>remove_quotes()</code> &mdash; strips the quote characters themselves</li>
+</ol>
+<p>Order matters: we expand FIRST (because quotes affect expansion rules), then remove quotes.</p>
+
+<h3>11.2 expand_string()</h3>
+<pre>
+char  *expand_string(char *str, int exit_status)
+{
+    char  *result;
+    int   i;
+    char  quote;
+
+    result = ft_strdup("");
+    i = 0;
+    quote = 0;
+    while (str[i])
+    {
+        if (!quote && (str[i] == '\'' || str[i] == '"'))
+            quote = str[i];                // entering quotes
+        else if (quote && str[i] == quote)
+            quote = 0;                     // leaving quotes
+        if (str[i] == '$' && quote != '\'' && str[i + 1]
+            && str[i + 1] != ' ' && str[i + 1] != '"' && str[i + 1] != '\'')
+            result = join_and_free(result, get_var_value(str, &amp;i, exit_status));
+        else
+            result = join_and_free(result, char_to_str(str[i++]));
+    }
+    return (result);
+}
+</pre>
+
+<p><strong>Key rules:</strong></p>
+<ul>
+  <li><code>$VAR</code> inside <strong>double quotes</strong> (<code>quote == '"'</code>) &rarr; expanded</li>
+  <li><code>$VAR</code> inside <strong>single quotes</strong> (<code>quote == '\''</code>) &rarr; NOT expanded (literal text)</li>
+  <li><code>$VAR</code> outside quotes &rarr; expanded</li>
+</ul>
+
+<p><strong>Example:</strong></p>
+<pre>
+Input:  echo '$HOME' "$HOME"
+                                     (assuming HOME=/home/mmubina)
+Result: echo '$HOME' "/home/mmubina"
+        (single-quoted part is untouched, double-quoted part is expanded)
+</pre>
+
+<h3>11.3 get_var_value()</h3>
+<pre>
+static char  *get_var_value(char *str, int *i, int exit_status)
+{
+    char  *name;
+    char  *value;
+
+    (*i)++;                              // skip the '$'
+    if (str[*i] == '?')
+    {
+        (*i)++;
+        return (ft_itoa(exit_status));   // $? = last exit code
+    }
+    if (!ft_isalpha(str[*i]) && str[*i] != '_')
+        return (char_to_str('$'));       // bare $ with invalid next char
+    name = get_var_name(str, i);         // extract variable name
+    value = getenv(name);               // look up in environment
+    free(name);
+    if (value)
+        return (ft_strdup(value));       // found: return its value
+    return (ft_strdup(""));             // not found: return empty string
+}
+</pre>
+
+<p><strong>Note:</strong> The <code>i</code> parameter is <code>int *</code> (pointer), not <code>int</code>.
+This is because the function needs to advance the caller's index past the variable name.
+After <code>$HOME</code>, <code>i</code> should point past <code>E</code>, not stay at <code>$</code>.</p>
+
+<h3>11.4 Expander Utilities</h3>
+
+<p><strong>join_and_free():</strong> Joins two strings and frees both originals.</p>
+<pre>
+char  *join_and_free(char *s1, char *s2)
+{
+    char  *result;
+
+    if (!s1) return (s2);
+    if (!s2) return (s1);
+    result = ft_strjoin(s1, s2);
+    free(s1);
+    free(s2);
+    return (result);
+}
+</pre>
+
+<p><strong>char_to_str():</strong> Converts one character to a malloc'd string.</p>
+<pre>
+char  *char_to_str(char c)
+{
+    char  *str;
+
+    str = malloc(sizeof(char) * 2);   // 1 for char + 1 for '\0'
+    if (!str) return (NULL);
+    str[0] = c;
+    str[1] = '\0';
+    return (str);
+}
+</pre>
+
+<p><strong>remove_quotes():</strong> Strips quote characters while respecting nesting.</p>
+<pre>
+char  *remove_quotes(char *str)
+{
+    char  *result;
+    char  quote;
+    int   i;
+    int   j;
+
+    result = malloc(sizeof(char) * (ft_len(str) + 1));
+    if (!result) return (NULL);
+    i = 0;
+    j = 0;
+    quote = 0;
+    while (str[i])
+    {
+        if (!quote && (str[i] == '\'' || str[i] == '"'))
+            quote = str[i];           // opening quote: skip this character
+        else if (quote && str[i] == quote)
+            quote = 0;               // closing quote: skip this character
+        else
+            result[j++] = str[i];    // normal char: copy it
+        i++;
+    }
+    result[j] = '\0';
+    return (result);
+}
+</pre>
+
+<p><strong>Example:</strong></p>
+<pre>
+Input:   "hello"' world'
+Process: " -> quote='"', skip
+         h -> copy
+         e -> copy
+         l -> copy
+         l -> copy
+         o -> copy
+         " -> quote=0, skip
+         ' -> quote='\'', skip
+           -> copy (space)
+         w -> copy
+         ... etc
+         ' -> quote=0, skip
+Result:  hello world
+</pre>
+
+<!-- 12. SYNTAX CHECKER -->
+<div class="page-break"></div>
+<h2>12. Syntax Checker (syntax_check.c)</h2>
+
+<p>After tokenizing and expanding, we validate the token stream for structural errors
+before parsing. This catches things like <code>| ls</code> or <code>cat ></code>.</p>
+
+<h3>12.1 check_syntax() &mdash; Entry Point</h3>
+<pre>
+int  check_syntax(t_token *tokens)
+{
+    t_token  *tmp;
+    int      is_first;
+
+    tmp = tokens;
+    is_first = 1;
+    while (tmp)
+    {
+        if (tmp->type == TOKEN_PIPE && !check_pipe_syntax(tmp, is_first))
+            return (0);            // error found
+        if (is_redir_token(tmp->type) && !check_redir_syntax(tmp))
+            return (0);            // error found
+        is_first = 0;
+        tmp = tmp->next;
+    }
+    return (1);                    // all good
+}
+</pre>
+<p>Returns 1 for valid syntax, 0 for invalid. The <code>is_first</code> flag tracks whether
+we're looking at the first token (pipes can't be first).</p>
+
+<h3>12.2 Pipe Syntax Rules</h3>
+<pre>
+static int  check_pipe_syntax(t_token *tok, int is_first)
+{
+    if (is_first)                              // pipe at start: | ls
+    {
+        write(2, "minishell: syntax error near '|'\n", 32);
+        return (0);
+    }
+    if (!tok->next || tok->next->type == TOKEN_PIPE)  // pipe at end or ||
+    {
+        write(2, "minishell: syntax error near '|'\n", 32);
+        return (0);
+    }
+    return (1);
+}
+</pre>
+<table>
+  <tr><th>Input</th><th>Error?</th><th>Why</th></tr>
+  <tr><td><code>| ls</code></td><td>Yes</td><td>Pipe is first token</td></tr>
+  <tr><td><code>ls |</code></td><td>Yes</td><td>Nothing after pipe (tok->next is NULL)</td></tr>
+  <tr><td><code>ls || grep</code></td><td>Yes</td><td>Next token is also a pipe</td></tr>
+  <tr><td><code>ls | grep x</code></td><td>No</td><td>Valid pipe usage</td></tr>
+</table>
+
+<h3>12.3 Redirection Syntax Rules</h3>
+<pre>
+static int  check_redir_syntax(t_token *tok)
+{
+    if (!tok->next || tok->next->type != TOKEN_WORD)
+    {
+        write(2, "minishell: syntax error near redirection\n", 41);
+        return (0);
+    }
+    return (1);
+}
+</pre>
+<table>
+  <tr><th>Input</th><th>Error?</th><th>Why</th></tr>
+  <tr><td><code>cat ></code></td><td>Yes</td><td>Nothing after redirection</td></tr>
+  <tr><td><code>cat > | grep</code></td><td>Yes</td><td>Next token is PIPE, not WORD</td></tr>
+  <tr><td><code>cat > > file</code></td><td>Yes</td><td>Next token is REDIR_OUT, not WORD</td></tr>
+  <tr><td><code>cat > file</code></td><td>No</td><td>Next token is WORD ("file")</td></tr>
+</table>
+
+<!-- 13. PARSER -->
+<div class="page-break"></div>
+<h2>13. Parser (parser.c + parser_utils.c)</h2>
+
+<p>The parser takes the validated token linked list and converts it into a linked list of
+<code>t_cmd</code> structs &mdash; the format that the execution engine needs.</p>
+
+<h3>13.1 parse_tokens() &mdash; Entry Point</h3>
+<pre>
+t_cmd  *parse_tokens(t_token *tokens)
+{
+    t_cmd   *list;
+    t_cmd   *cmd;
+    t_token *current;
+
+    list = NULL;
+    current = tokens;
+    while (current)
+    {
+        cmd = new_cmd();
+        cmd->argv = build_argv(current, count_args(current));
+        extract_redirs(current, cmd);
+        add_cmd(&amp;list, cmd);
+        current = skip_to_pipe(current);   // jump to next command
+    }
+    return (list);
+}
+</pre>
+<p><strong>For each segment between pipes:</strong></p>
+<ol>
+  <li>Create a new empty command</li>
+  <li>Count WORD tokens and build argv array</li>
+  <li>Extract any redirections</li>
+  <li>Add command to the list</li>
+  <li>Skip past the pipe to the next segment</li>
+</ol>
+
+<h3>13.2 count_args()</h3>
+<pre>
+static int  count_args(t_token *tokens)
+{
+    int  count;
+
+    count = 0;
+    while (tokens && tokens->type != TOKEN_PIPE)
+    {
+        if (tokens->type == TOKEN_WORD)
+            count++;                   // count this word
+        else if (tokens->type != TOKEN_PIPE)
+            tokens = tokens->next;     // skip the redir's filename
+        tokens = tokens->next;
+    }
+    return (count);
+}
+</pre>
+<p><strong>Why skip after a redirection?</strong> In <code>cat &gt; file.txt -n</code>, the tokens are
+<code>[cat] [&gt;] [file.txt] [-n]</code>. The <code>file.txt</code> after <code>&gt;</code> is the
+redirection target, NOT an argument to cat. So when we see a non-WORD non-PIPE token (a redirection),
+we skip the next token (the filename) to avoid counting it as an argument.</p>
+
+<h3>13.3 build_argv()</h3>
+<pre>
+static char  **build_argv(t_token *tokens, int count)
+{
+    char  **argv;
+    int   i;
+
+    argv = malloc(sizeof(char *) * (count + 1));   // +1 for NULL terminator
+    if (!argv) return (NULL);
+    i = 0;
+    while (tokens && tokens->type != TOKEN_PIPE)
+    {
+        if (tokens->type == TOKEN_WORD)
+            argv[i++] = ft_strdup(tokens->value);  // copy word into argv
+        else if (tokens->type != TOKEN_PIPE)
+            tokens = tokens->next;                 // skip redir filename
+        tokens = tokens->next;
+    }
+    argv[i] = NULL;                                // NULL-terminate (required by execve)
+    return (argv);
+}
+</pre>
+<p><strong>Why NULL-terminate?</strong> The <code>execve()</code> system call requires argv to end
+with a NULL pointer. This is how it knows where the argument list ends.</p>
+
+<h3>13.4 extract_redirs()</h3>
+<pre>
+static void  extract_redirs(t_token *tokens, t_cmd *cmd)
+{
+    while (tokens && tokens->type != TOKEN_PIPE)
+    {
+        if (tokens->type != TOKEN_WORD && tokens->type != TOKEN_PIPE
+            && tokens->next)
+        {
+            add_redir(&amp;cmd->redirections,
+                new_redir(ft_strdup(tokens->next->value), tokens->type));
+        }
+        tokens = tokens->next;
+    }
+}
+</pre>
+<p>Walks the tokens looking for redirection operators. When found, saves the operator type
+and the next token's value (the filename) as a <code>t_redir</code> node.</p>
+
+<h3>13.5 skip_to_pipe()</h3>
+<pre>
+static t_token  *skip_to_pipe(t_token *tokens)
+{
+    while (tokens && tokens->type != TOKEN_PIPE)
+        tokens = tokens->next;      // walk past all non-pipe tokens
+    if (tokens)
+        tokens = tokens->next;      // skip the pipe token itself
+    return (tokens);                // return first token of next command (or NULL)
+}
+</pre>
+
+<h3>13.6 Parser Utilities (parser_utils.c)</h3>
+<p>Contains <code>new_cmd()</code>, <code>add_cmd()</code>, <code>new_redir()</code>,
+<code>add_redir()</code> &mdash; same linked list patterns as token_utils.c.</p>
+
+<p><strong>free_cmds()</strong> deserves attention because it frees three levels:</p>
+<pre>
+void  free_cmds(t_cmd *list)
+{
+    t_cmd   *tmp;
+    t_redir *rtmp;
+    int     i;
+
+    while (list)
+    {
+        tmp = list->next;
+        if (list->argv)                       // 1. Free argv array
+        {
+            i = 0;
+            while (list->argv[i])
+                free(list->argv[i++]);        //    Free each string
+            free(list->argv);                 //    Free the array itself
+        }
+        while (list->redirections)            // 2. Free redirection list
+        {
+            rtmp = list->redirections->next;
+            free(list->redirections->file);   //    Free filename string
+            free(list->redirections);         //    Free redir node
+            list->redirections = rtmp;
+        }
+        free(list);                           // 3. Free the cmd node
+        list = tmp;
+    }
+}
+</pre>
+
+<!-- 14. MAIN LOOP -->
+<div class="page-break"></div>
+<h2>14. Main Loop (main.c)</h2>
+
+<pre>
+int  main(int argc, char **argv, char **envp)
+{
+    char    *input;
+    t_token *tokens;
+    t_cmd   *cmds;
+
+    (void)argc;
+    (void)argv;
+    (void)envp;
+    while (1)
+    {
+        input = readline("minishell> ");    // 1. Read user input
+        if (!input)
+            break ;                         // Ctrl+D: exit
+        if (input[0] != '\0')
+            add_history(input);             // 2. Save to history
+        tokens = tokenize(input);           // 3. Tokenize
+        free(input);
+        if (!tokens)
+            continue ;                      // Empty or error: next prompt
+        expand_tokens(tokens, 0);           // 4. Expand variables
+        if (!check_syntax(tokens))          // 5. Validate syntax
+        {
+            free_tokens(tokens);
+            continue ;                      // Syntax error: next prompt
+        }
+        cmds = parse_tokens(tokens);        // 6. Parse into commands
+        print_cmds(cmds);                   // 7. (Debug) Print result
+        free_tokens(tokens);                // 8. Clean up
+        free_cmds(cmds);
+    }
+    return (0);
+}
+</pre>
+
+<p><strong>Memory management flow:</strong></p>
+<ul>
+  <li><code>input</code> &mdash; allocated by <code>readline()</code>, freed after tokenizing</li>
+  <li><code>tokens</code> &mdash; allocated by <code>tokenize()</code>, freed after parsing</li>
+  <li><code>cmds</code> &mdash; allocated by <code>parse_tokens()</code>, freed after execution (currently printing)</li>
+</ul>
+
+<!-- ==================== PART III ==================== -->
+<div class="page-break"></div>
+<h2>Part III &mdash; Full Example Trace</h2>
+
+<h2>15. End-to-End Walkthrough</h2>
+
+<p>Let's trace the complete input: <code>cat -n &lt; in.txt | grep "hello $USER" &gt;&gt; log.txt</code></p>
+
+<h3>Stage 1: Tokenizer</h3>
+<pre>
+i=0  'c' -> handle_word  -> [WORD:"cat"]       i=3
+i=3  ' ' -> skip                                i=4
+i=4  '-' -> handle_word  -> [WORD:"-n"]         i=6
+i=6  ' ' -> skip                                i=7
+i=7  '&lt;' -> handle_operator -> [REDIR_IN:"&lt;"]   i=8
+i=8  ' ' -> skip                                i=9
+i=9  'i' -> handle_word  -> [WORD:"in.txt"]     i=15
+i=15 ' ' -> skip                                i=16
+i=16 '|' -> handle_operator -> [PIPE:"|"]       i=17
+i=17 ' ' -> skip                                i=18
+i=18 'g' -> handle_word  -> [WORD:"grep"]       i=22
+i=22 ' ' -> skip                                i=23
+i=23 '"' -> handle_word:
+             skip_quotes jumps to i=36 (past closing ")
+             -> [WORD:"\"hello $USER\""]        i=36
+i=36 ' ' -> skip                                i=37
+i=37 '>' -> handle_operator:
+             next char is '>' -> TOKEN_APPEND
+             -> [APPEND:">>"]                    i=39
+i=39 ' ' -> skip                                i=40
+i=40 'l' -> handle_word  -> [WORD:"log.txt"]    i=47
+</pre>
+
+<p><strong>Token list:</strong></p>
+<pre>
+[WORD:"cat"] -> [WORD:"-n"] -> [REDIR_IN:"&lt;"] -> [WORD:"in.txt"] -> [PIPE:"|"]
+  -> [WORD:"grep"] -> [WORD:"\"hello $USER\""] -> [APPEND:">>"] -> [WORD:"log.txt"]
+</pre>
+
+<h3>Stage 2: Expander</h3>
+<pre>
+Only TOKEN_WORD tokens are processed:
+
+"cat"                -> "cat"               (no $ or quotes)
+"-n"                 -> "-n"                (no $ or quotes)
+"in.txt"             -> "in.txt"            (no $ or quotes)
+"\"hello $USER\""    -> "\"hello mmubina\"" (expand $USER inside double quotes)
+  then remove_quotes -> "hello mmubina"     (strip the double quotes)
+"log.txt"            -> "log.txt"           (no $ or quotes)
+</pre>
+
+<h3>Stage 3: Syntax Check</h3>
+<pre>
+[WORD] - ok (is_first=1, not pipe/redir)
+[WORD] - ok
+[REDIR_IN] - check_redir_syntax: next is [WORD:"in.txt"] -> ok
+[WORD] - ok
+[PIPE] - check_pipe_syntax: not first, next is [WORD:"grep"] -> ok
+[WORD] - ok
+[WORD] - ok
+[APPEND] - check_redir_syntax: next is [WORD:"log.txt"] -> ok
+[WORD] - ok
+Result: 1 (valid)
+</pre>
+
+<h3>Stage 4: Parser</h3>
+<pre>
+Segment 1 (before pipe): [WORD:"cat"] [WORD:"-n"] [REDIR_IN] [WORD:"in.txt"]
+  count_args: "cat"=1, "-n"=2, REDIR_IN=skip next, result=2
+  build_argv: ["cat", "-n", NULL]
+  extract_redirs: REDIR_IN with file "in.txt"
+  -> CMD 1: argv=["cat", "-n"], redirections=[REDIR_IN -> "in.txt"]
+
+Segment 2 (after pipe): [WORD:"grep"] [WORD:"hello mmubina"] [APPEND] [WORD:"log.txt"]
+  count_args: "grep"=1, "hello mmubina"=2, APPEND=skip next, result=2
+  build_argv: ["grep", "hello mmubina", NULL]
+  extract_redirs: APPEND with file "log.txt"
+  -> CMD 2: argv=["grep", "hello mmubina"], redirections=[APPEND -> "log.txt"]
+</pre>
+
+<p><strong>Final result:</strong></p>
+<pre>
+t_cmd 1                                    t_cmd 2
++-------------------------------+          +-------------------------------+
+| argv: ["cat", "-n"]          |          | argv: ["grep","hello mmubina"]|
+| redirections:                 |    -->   | redirections:                 |  --> NULL
+|   [REDIR_IN -> "in.txt"]    |          |   [APPEND -> "log.txt"]      |
++-------------------------------+          +-------------------------------+
+</pre>
+
+<p>This is exactly what the execution engine needs to run the pipeline.</p>
+
+<div class="page-break"></div>
+<h2>Quick Reference: All Files</h2>
+
+<table>
+  <tr><th>File</th><th>Purpose</th><th>Key functions</th></tr>
+  <tr>
+    <td>minishell.h</td>
+    <td>Data structures + prototypes</td>
+    <td>t_token, t_cmd, t_redir, t_token_type</td>
+  </tr>
+  <tr>
+    <td>tokenizer.c</td>
+    <td>Lexer: string to tokens</td>
+    <td>tokenize(), handle_word(), handle_operator(), skip_quotes()</td>
+  </tr>
+  <tr>
+    <td>token_utils.c</td>
+    <td>Token linked list ops</td>
+    <td>new_token(), add_token(), free_tokens(), get_redir_type()</td>
+  </tr>
+  <tr>
+    <td>expander.c</td>
+    <td>Variable expansion</td>
+    <td>expand_tokens(), expand_string(), get_var_value()</td>
+  </tr>
+  <tr>
+    <td>expander_utils.c</td>
+    <td>String helpers</td>
+    <td>join_and_free(), char_to_str(), remove_quotes()</td>
+  </tr>
+  <tr>
+    <td>syntax_check.c</td>
+    <td>Token validation</td>
+    <td>check_syntax(), check_pipe_syntax(), check_redir_syntax()</td>
+  </tr>
+  <tr>
+    <td>parser.c</td>
+    <td>Tokens to commands</td>
+    <td>parse_tokens(), build_argv(), extract_redirs(), count_args()</td>
+  </tr>
+  <tr>
+    <td>parser_utils.c</td>
+    <td>Command linked list ops</td>
+    <td>new_cmd(), add_cmd(), free_cmds(), new_redir(), add_redir()</td>
+  </tr>
+  <tr>
+    <td>main.c</td>
+    <td>Shell loop</td>
+    <td>main(), print_cmds()</td>
+  </tr>
+</table>
+
+<br><br>
+<p style="text-align: center; color: #999; font-size: 10pt;">
+  Minishell Parsing Guide &mdash; mmubina @ 42 &mdash; February 2026
+</p>
+
+</body>
+</html>
